@@ -6,65 +6,66 @@ on:
 
   workflow_dispatch:
 
+env:
+  DISPLAY_NUM: "99"
+  DISPLAY: ":99"
+
 jobs:
   run:
     runs-on: ubuntu-latest
 
-    container:
-      image: ghcr.io/incorporatingh/turing/automation-env:latest
-      options: --shm-size=2g
-
     steps:
-      # ── 1. Start the display environment ──────────────
-      #    GitHub Actions overrides Docker ENTRYPOINT,
-      #    so we must start Xvfb / XFCE / VNC ourselves.
-      - name: Start headless display environment
+      # ── 1. Install system packages ────────────────────
+      #    (~2 min on GitHub's runners, unavoidable without a custom image)
+      - name: Block Snap Firefox + add Mozilla repo
         run: |
-          echo "=== Starting Xvfb ==="
-          rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
-          setsid Xvfb :99 -screen 0 1920x1080x24 +extension RANDR \
-            > /tmp/xvfb.log 2>&1 &
+          sudo tee /etc/apt/preferences.d/block-firefox-snap > /dev/null << 'PIN'
+          Package: firefox*
+          Pin: release o=Ubuntu
+          Pin-Priority: -1
+          PIN
 
-          echo "=== Waiting for X server ==="
-          for i in $(seq 1 20); do
-            if xdpyinfo -display :99 &>/dev/null; then
-              echo "Xvfb ready"
-              break
-            fi
-            if [ "$i" -eq 20 ]; then
-              echo "ERROR: Xvfb failed to start"
-              cat /tmp/xvfb.log
-              exit 1
-            fi
-            sleep 1
-          done
+          sudo tee /etc/apt/preferences.d/mozilla > /dev/null << 'PIN'
+          Package: firefox*
+          Pin: origin packages.mozilla.org
+          Pin-Priority: 1001
+          PIN
 
-          echo "=== Starting XFCE desktop ==="
-          setsid dbus-launch --exit-with-session startxfce4 \
-            > /tmp/xfce.log 2>&1 &
+          sudo install -d -m 0755 /etc/apt/keyrings
+          wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg \
+            | sudo tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null
 
-          echo "=== Waiting for window manager ==="
-          for i in $(seq 1 30); do
-            if pgrep -x xfwm4 &>/dev/null; then
-              echo "xfwm4 ready"
-              break
-            fi
-            if [ "$i" -eq 30 ]; then
-              echo "WARNING: xfwm4 not detected, continuing anyway"
-            fi
-            sleep 1
-          done
+          echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] \
+            https://packages.mozilla.org/apt mozilla main" \
+            | sudo tee /etc/apt/sources.list.d/mozilla.list > /dev/null
 
-          echo "=== Starting VNC (for debugging) ==="
-          setsid x11vnc -display :99 -forever -shared -nopw \
-            -rfbport 5900 > /tmp/x11vnc.log 2>&1 &
-          setsid websockify --web=/usr/share/novnc/ 6080 127.0.0.1:5900 \
-            > /tmp/novnc.log 2>&1 &
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            python3-pip python3-tk python3-dev python3-venv \
+            xvfb x11-xserver-utils xauth dbus-x11 \
+            xfce4 xfce4-goodies openbox \
+            wmctrl xclip scrot xdotool \
+            x11vnc novnc python3-websockify \
+            firefox \
+            procps
 
-          sleep 2
-          echo "=== Display environment ready ==="
+      # ── 2. Restore camoufox cache ─────────────────────
+      #    First run: downloads ~700 MB, then caches it.
+      #    Every subsequent run: restores from cache in ~5 seconds.
+      #    The key includes the camoufox version so a version
+      #    bump in requirements.txt triggers a fresh download.
+      - name: Restore camoufox binary cache
+        id: cache-camoufox
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.camoufox
+            ~/.cache/camoufox
+          key: camoufox-${{ runner.os }}-${{ hashFiles('requirements-refs.txt') }}
 
-      # ── 2. Fetch scripts from private repo ────────────
+      # ── 3. Fetch private scripts ──────────────────────
       - name: Fetch private scripts
         uses: actions/checkout@v4
         with:
@@ -72,65 +73,95 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_PAT }}
           path: _private
 
-      # ── 3. Verify environment ─────────────────────────
+      # ── 4. Install Python packages (with pip cache) ───
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('_private/scripts/requirements.txt') }}
+          restore-keys: pip-${{ runner.os }}-
+
+      - name: Install Python dependencies
+        run: |
+          pip3 install --break-system-packages -r _private/scripts/requirements.txt
+
+      # ── 5. Pre-fetch camoufox binary (skip if cached) ─
+      - name: Fetch camoufox browser binary
+        if: steps.cache-camoufox.outputs.cache-hit != 'true'
+        run: python3 -m camoufox fetch
+
+      # ── 6. Start display environment ──────────────────
+      - name: Start headless display
+        run: |
+          rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
+
+          setsid Xvfb :99 -screen 0 1920x1080x24 +extension RANDR \
+            > /tmp/xvfb.log 2>&1 &
+
+          for i in $(seq 1 20); do
+            if xdpyinfo -display :99 &>/dev/null; then
+              echo "Xvfb ready"
+              break
+            fi
+            [ "$i" -eq 20 ] && { echo "Xvfb failed"; cat /tmp/xvfb.log; exit 1; }
+            sleep 1
+          done
+
+          setsid dbus-launch --exit-with-session startxfce4 \
+            > /tmp/xfce.log 2>&1 &
+
+          for i in $(seq 1 30); do
+            if pgrep -x xfwm4 &>/dev/null; then
+              echo "Window manager ready"
+              break
+            fi
+            [ "$i" -eq 30 ] && echo "WARNING: xfwm4 not detected"
+            sleep 1
+          done
+
+          setsid x11vnc -display :99 -forever -shared -nopw \
+            -rfbport 5900 > /tmp/x11vnc.log 2>&1 &
+          setsid websockify --web=/usr/share/novnc/ 6080 127.0.0.1:5900 \
+            > /tmp/novnc.log 2>&1 &
+
+          sleep 2
+          echo "Display environment ready"
+
+      # ── 7. Verify everything ──────────────────────────
       - name: Verify environment
         run: |
-          echo "DISPLAY = $DISPLAY"
-          echo "---"
-          echo "X server test:"
+          echo "DISPLAY=$DISPLAY"
+          echo "--- X server ---"
           xdpyinfo -display :99 2>&1 | head -5
-          echo "---"
-          echo "Firefox:"
-          firefox --version 2>/dev/null || echo "NOT FOUND"
-          echo "---"
-          echo "Python:"
-          python3 --version
-          echo "---"
-          echo "camoufox binary:"
-          find /root/.camoufox -type f $$ -name '*firefox*' -o -name '*camoufox*' $$ 2>/dev/null \
-            | head -5 || echo "NOT FOUND"
-          echo "---"
-          echo "camoufox import:"
-          python3 -c "from camoufox.sync_api import Camoufox; print('OK')" 2>&1
-          echo "---"
-          echo "pyautogui import:"
-          python3 -c "import pyautogui; print('OK')" 2>&1
-          echo "---"
-          echo "Running processes:"
-          ps aux | grep -E 'Xvfb|xfwm4|xfce|x11vnc|websockify' | grep -v grep
+          echo "--- Firefox ---"
+          firefox --version
+          echo "--- camoufox ---"
+          ls -lh ~/.camoufox/ 2>/dev/null || echo "No cache dir"
+          python3 -c "from camoufox.sync_api import Camoufox; print('import OK')" 2>&1
+          echo "--- pyautogui ---"
+          python3 -c "import pyautogui; print('import OK')" 2>&1
+          echo "--- processes ---"
+          ps aux | grep -E 'Xvfb|xfwm4|x11vnc' | grep -v grep
 
-      # ── 4. Install Python deps (fast no-op if cached) ─
-      - name: Install Python dependencies
-        working-directory: _private/scripts
-        run: |
-          pip3 install --break-system-packages -r requirements.txt
-
-      # ── 5. Run both scripts ───────────────────────────
+      # ── 8. Run both scripts ───────────────────────────
       - name: Run automation
         working-directory: _private/scripts
         run: |
-          # Background: temp-mail bot (camoufox, headless)
           python3 tempmail_bot.py &
           TEMPMAIL_PID=$!
 
-          # Foreground: reddit automation (Firefox + pyautogui)
           python3 reddit_script_2.py
           SCRIPT_EXIT=$?
 
-          # Clean up
           kill $TEMPMAIL_PID 2>/dev/null || true
           wait $TEMPMAIL_PID 2>/dev/null
 
           exit $SCRIPT_EXIT
 
-      # ── 6. Screenshot (always, for debugging) ─────────
-      - name: Capture display screenshot
+      # ── 9. Screenshot for debugging ───────────────────
+      - name: Capture screenshot
         if: always()
-        run: |
-          scrot /tmp/final-state.png 2>/dev/null || echo "Screenshot failed"
-          # Also dump Xvfb log if something went wrong
-          echo "=== Xvfb log (last 20 lines) ==="
-          tail -20 /tmp/xvfb.log 2>/dev/null || echo "(no log)"
+        run: scrot /tmp/final-state.png 2>/dev/null || true
 
       - name: Upload screenshot
         if: always()

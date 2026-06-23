@@ -3,7 +3,6 @@ name: Run Automation
 on:
   schedule:
     - cron: '*/5 * * * *'
-
   workflow_dispatch:
 
 env:
@@ -15,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ── 1. Install system packages ────────────────────
+      # ── 1. System packages ────────────────────────────
       - name: Block Snap Firefox + add Mozilla repo
         run: |
           sudo tee /etc/apt/preferences.d/block-firefox-snap > /dev/null << 'PIN'
@@ -50,7 +49,7 @@ jobs:
             firefox \
             procps
 
-      # ── 2. Restore camoufox cache ─────────────────────
+      # ── 2. Camoufox cache ─────────────────────────────
       - name: Restore camoufox binary cache
         id: cache-camoufox
         uses: actions/cache@v4
@@ -60,7 +59,7 @@ jobs:
             ~/.cache/camoufox
           key: camoufox-${{ runner.os }}-${{ hashFiles('_private/scripts/requirements-refs.txt') }}
 
-      # ── 3. Fetch private scripts ──────────────────────
+      # ── 3. Private scripts ────────────────────────────
       - name: Fetch private scripts
         uses: actions/checkout@v4
         with:
@@ -68,7 +67,7 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_PAT }}
           path: _private
 
-      # ── 4. Install Python packages (with pip cache) ───
+      # ── 4. Python deps ────────────────────────────────
       - name: Cache pip packages
         uses: actions/cache@v4
         with:
@@ -77,41 +76,32 @@ jobs:
           restore-keys: pip-${{ runner.os }}-
 
       - name: Install Python dependencies
-        run: |
-          pip3 install --break-system-packages -r _private/scripts/requirements.txt
+        run: pip3 install --break-system-packages -r _private/scripts/requirements.txt
 
-      # ── 5. Pre-fetch camoufox binary (skip if cached) ─
       - name: Fetch camoufox browser binary
         if: steps.cache-camoufox.outputs.cache-hit != 'true'
         run: python3 -m camoufox fetch
 
+      # ── 5. Display environment ────────────────────────
       - name: Start headless display
         run: |
-          # Create empty Xauthority file (pyautogui/xlib expects it)
           touch ~/.Xauthority
-
-          # Clean stale locks
           rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
 
-          # Start Xvfb
           Xvfb :99 -screen 0 1920x1080x24 +extension RANDR &
 
-          # Wait for the X socket to appear
           for i in $(seq 1 20); do
             if [ -S /tmp/.X11-unix/X99 ]; then
-              echo "Xvfb ready (socket found)"
+              echo "Xvfb ready"
               break
             fi
-            [ "$i" -eq 20 ] && { echo "Xvfb failed to create socket"; exit 1; }
+            [ "$i" -eq 20 ] && { echo "Xvfb failed"; exit 1; }
             sleep 1
           done
-
           sleep 2
 
-          # Start XFCE desktop
           dbus-launch --exit-with-session startxfce4 &
 
-          # Wait for window manager
           for i in $(seq 1 30); do
             if pgrep -x xfwm4 &>/dev/null; then
               echo "Window manager ready"
@@ -121,34 +111,67 @@ jobs:
             sleep 1
           done
 
-          # Start VNC (for debugging)
+      # ── 6. VNC + Cloudflare tunnel ────────────────────
+      - name: Start VNC and debug tunnel
+        run: |
+          # Start VNC server
           x11vnc -display :99 -forever -shared -nopw \
             -rfbport 5900 > /tmp/x11vnc.log 2>&1 &
+
           websockify --web=/usr/share/novnc/ 6080 127.0.0.1:5900 \
             > /tmp/novnc.log 2>&1 &
 
           sleep 2
 
-          # Verify
-          echo "X server test:"
-          xdpyinfo -display :99 2>&1 | head -3
-          echo "Display environment ready"
-          
-      # ── 7. Verify everything ──────────────────────────
+          # Install cloudflared
+          wget -qO /tmp/cloudflared \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x /tmp/cloudflared
+
+          # Start quick tunnel (no Cloudflare account needed)
+          nohup /tmp/cloudflared tunnel --url http://localhost:6080 \
+            > /tmp/cf-tunnel.log 2>&1 &
+
+          # Wait for tunnel URL to appear
+          TUNNEL_URL=""
+          for i in $(seq 1 30); do
+            TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' \
+              /tmp/cf-tunnel.log 2>/dev/null | head -1)
+            if [ -n "$TUNNEL_URL" ]; then
+              break
+            fi
+            sleep 2
+          done
+
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════╗"
+          echo "║  LIVE DESKTOP — open this URL in your browser:          ║"
+          echo "║                                                         ║"
+          if [ -n "$TUNNEL_URL" ]; then
+            echo "║  ${TUNNEL_URL}/vnc.html"
+          else
+            echo "║  FAILED: cloudflared tunnel did not start               ║"
+            echo "║  Check /tmp/cf-tunnel.log for details                   ║"
+          fi
+          echo "║                                                         ║"
+          echo "║  When noVNC connects: click the screen, no password     ║"
+          echo "╚══════════════════════════════════════════════════════════╝"
+          echo ""
+
+      # ── 7. Verify ─────────────────────────────────────
       - name: Verify environment
         run: |
           echo "DISPLAY=$DISPLAY"
           echo "--- Firefox ---"
           firefox --version
           echo "--- camoufox ---"
-          ls -lh ~/.camoufox/ 2>/dev/null || echo "No cache dir"
           python3 -c "from camoufox.sync_api import Camoufox; print('import OK')" 2>&1
           echo "--- pyautogui ---"
           python3 -c "import pyautogui; print('import OK')" 2>&1
           echo "--- processes ---"
-          ps aux | grep -E 'Xvfb|xfwm4|x11vnc' | grep -v grep
+          ps aux | grep -E 'Xvfb|xfwm4|x11vnc|websockify|cloudflared' | grep -v grep
 
-      # ── 8. Run both scripts ───────────────────────────
+      # ── 8. Run scripts ────────────────────────────────
       - name: Run automation
         working-directory: _private/scripts
         run: |
@@ -163,7 +186,7 @@ jobs:
 
           exit $SCRIPT_EXIT
 
-      # ── 9. Screenshot for debugging ───────────────────
+      # ── 9. Debug artifacts ────────────────────────────
       - name: Capture screenshot
         if: always()
         run: scrot /tmp/final-state.png 2>/dev/null || true

@@ -85,9 +85,11 @@ jobs:
         if: steps.cache-camoufox.outputs.cache-hit != 'true'
         run: python3 -m camoufox fetch
 
-      # ── 6. Start display environment ──────────────────
       - name: Start headless display
         run: |
+          # Create empty Xauthority file (pyautogui/xlib expects it)
+          touch ~/.Xauthority
+
           # Clean stale locks
           rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
 

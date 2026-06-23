@@ -12,10 +12,59 @@ jobs:
 
     container:
       image: ghcr.io/incorporatingh/turing/automation-env:latest
-      # No credentials block needed — package is public
       options: --shm-size=2g
 
     steps:
+      # ── 1. Start the display environment ──────────────
+      #    GitHub Actions overrides Docker ENTRYPOINT,
+      #    so we must start Xvfb / XFCE / VNC ourselves.
+      - name: Start headless display environment
+        run: |
+          echo "=== Starting Xvfb ==="
+          rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
+          setsid Xvfb :99 -screen 0 1920x1080x24 +extension RANDR \
+            > /tmp/xvfb.log 2>&1 &
+
+          echo "=== Waiting for X server ==="
+          for i in $(seq 1 20); do
+            if xdpyinfo -display :99 &>/dev/null; then
+              echo "Xvfb ready"
+              break
+            fi
+            if [ "$i" -eq 20 ]; then
+              echo "ERROR: Xvfb failed to start"
+              cat /tmp/xvfb.log
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "=== Starting XFCE desktop ==="
+          setsid dbus-launch --exit-with-session startxfce4 \
+            > /tmp/xfce.log 2>&1 &
+
+          echo "=== Waiting for window manager ==="
+          for i in $(seq 1 30); do
+            if pgrep -x xfwm4 &>/dev/null; then
+              echo "xfwm4 ready"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "WARNING: xfwm4 not detected, continuing anyway"
+            fi
+            sleep 1
+          done
+
+          echo "=== Starting VNC (for debugging) ==="
+          setsid x11vnc -display :99 -forever -shared -nopw \
+            -rfbport 5900 > /tmp/x11vnc.log 2>&1 &
+          setsid websockify --web=/usr/share/novnc/ 6080 127.0.0.1:5900 \
+            > /tmp/novnc.log 2>&1 &
+
+          sleep 2
+          echo "=== Display environment ready ==="
+
+      # ── 2. Fetch scripts from private repo ────────────
       - name: Fetch private scripts
         uses: actions/checkout@v4
         with:
@@ -23,40 +72,67 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_PAT }}
           path: _private
 
-      - name: Verify Python dependencies
+      # ── 3. Verify environment ─────────────────────────
+      - name: Verify environment
         run: |
-          pip3 install --break-system-packages -r _private/scripts/requirements.txt
-
-      - name: Environment diagnostics
-        run: |
-          echo "DISPLAY=$DISPLAY"
-          firefox --version 2>/dev/null || echo "Firefox: not found"
+          echo "DISPLAY = $DISPLAY"
+          echo "---"
+          echo "X server test:"
+          xdpyinfo -display :99 2>&1 | head -5
+          echo "---"
+          echo "Firefox:"
+          firefox --version 2>/dev/null || echo "NOT FOUND"
+          echo "---"
+          echo "Python:"
           python3 --version
-          python3 -c "import camoufox; print('camoufox', camoufox.__version__)" 2>/dev/null || echo "camoufox: not importable"
-          python3 -c "import pyautogui; print('pyautogui OK')" 2>/dev/null || echo "pyautogui: not importable"
-          echo "XFCE processes:"
-          pgrep -a xf 2>/dev/null || echo "(none)"
+          echo "---"
+          echo "camoufox binary:"
+          find /root/.camoufox -type f $$ -name '*firefox*' -o -name '*camoufox*' $$ 2>/dev/null \
+            | head -5 || echo "NOT FOUND"
+          echo "---"
+          echo "camoufox import:"
+          python3 -c "from camoufox.sync_api import Camoufox; print('OK')" 2>&1
+          echo "---"
+          echo "pyautogui import:"
+          python3 -c "import pyautogui; print('OK')" 2>&1
+          echo "---"
+          echo "Running processes:"
+          ps aux | grep -E 'Xvfb|xfwm4|xfce|x11vnc|websockify' | grep -v grep
 
+      # ── 4. Install Python deps (fast no-op if cached) ─
+      - name: Install Python dependencies
+        working-directory: _private/scripts
+        run: |
+          pip3 install --break-system-packages -r requirements.txt
+
+      # ── 5. Run both scripts ───────────────────────────
       - name: Run automation
         working-directory: _private/scripts
         run: |
+          # Background: temp-mail bot (camoufox, headless)
           python3 tempmail_bot.py &
           TEMPMAIL_PID=$!
 
+          # Foreground: reddit automation (Firefox + pyautogui)
           python3 reddit_script_2.py
           SCRIPT_EXIT=$?
 
+          # Clean up
           kill $TEMPMAIL_PID 2>/dev/null || true
           wait $TEMPMAIL_PID 2>/dev/null
 
           exit $SCRIPT_EXIT
 
-      - name: Capture final display state
+      # ── 6. Screenshot (always, for debugging) ─────────
+      - name: Capture display screenshot
         if: always()
         run: |
-          scrot /tmp/final-state.png 2>/dev/null || echo "Screenshot capture failed"
+          scrot /tmp/final-state.png 2>/dev/null || echo "Screenshot failed"
+          # Also dump Xvfb log if something went wrong
+          echo "=== Xvfb log (last 20 lines) ==="
+          tail -20 /tmp/xvfb.log 2>/dev/null || echo "(no log)"
 
-      - name: Upload screenshot artifact
+      - name: Upload screenshot
         if: always()
         uses: actions/upload-artifact@v4
         with:

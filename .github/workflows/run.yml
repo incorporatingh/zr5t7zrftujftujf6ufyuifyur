@@ -16,7 +16,6 @@ jobs:
 
     steps:
       # ── 1. Install system packages ────────────────────
-      #    (~2 min on GitHub's runners, unavoidable without a custom image)
       - name: Block Snap Firefox + add Mozilla repo
         run: |
           sudo tee /etc/apt/preferences.d/block-firefox-snap > /dev/null << 'PIN'
@@ -44,7 +43,7 @@ jobs:
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             python3-pip python3-tk python3-dev python3-venv \
-            xvfb x11-xserver-utils xauth dbus-x11 \
+            xvfb x11-xserver-utils x11-utils xauth dbus-x11 \
             xfce4 xfce4-goodies openbox \
             wmctrl xclip scrot xdotool \
             x11vnc novnc python3-websockify \
@@ -52,10 +51,6 @@ jobs:
             procps
 
       # ── 2. Restore camoufox cache ─────────────────────
-      #    First run: downloads ~700 MB, then caches it.
-      #    Every subsequent run: restores from cache in ~5 seconds.
-      #    The key includes the camoufox version so a version
-      #    bump in requirements.txt triggers a fresh download.
       - name: Restore camoufox binary cache
         id: cache-camoufox
         uses: actions/cache@v4
@@ -63,7 +58,7 @@ jobs:
           path: |
             ~/.camoufox
             ~/.cache/camoufox
-          key: camoufox-${{ runner.os }}-${{ hashFiles('requirements-refs.txt') }}
+          key: camoufox-${{ runner.os }}-${{ hashFiles('_private/scripts/requirements-refs.txt') }}
 
       # ── 3. Fetch private scripts ──────────────────────
       - name: Fetch private scripts
@@ -93,23 +88,30 @@ jobs:
       # ── 6. Start display environment ──────────────────
       - name: Start headless display
         run: |
+          # Clean stale locks
           rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
+          mkdir -p /root && touch /root/.Xauthority
 
-          setsid Xvfb :99 -screen 0 1920x1080x24 +extension RANDR \
-            > /tmp/xvfb.log 2>&1 &
+          # Start Xvfb
+          Xvfb :99 -screen 0 1920x1080x24 +extension RANDR &
 
+          # Wait for the X socket to appear
           for i in $(seq 1 20); do
-            if xdpyinfo -display :99 &>/dev/null; then
-              echo "Xvfb ready"
+            if [ -S /tmp/.X11-unix/X99 ]; then
+              echo "Xvfb ready (socket found)"
               break
             fi
-            [ "$i" -eq 20 ] && { echo "Xvfb failed"; cat /tmp/xvfb.log; exit 1; }
+            [ "$i" -eq 20 ] && { echo "Xvfb failed to create socket"; exit 1; }
             sleep 1
           done
 
-          setsid dbus-launch --exit-with-session startxfce4 \
-            > /tmp/xfce.log 2>&1 &
+          # Extra settle time
+          sleep 2
 
+          # Start XFCE desktop
+          dbus-launch --exit-with-session startxfce4 &
+
+          # Wait for window manager
           for i in $(seq 1 30); do
             if pgrep -x xfwm4 &>/dev/null; then
               echo "Window manager ready"
@@ -119,20 +121,23 @@ jobs:
             sleep 1
           done
 
-          setsid x11vnc -display :99 -forever -shared -nopw \
+          # Start VNC (for debugging only, optional)
+          x11vnc -display :99 -forever -shared -nopw \
             -rfbport 5900 > /tmp/x11vnc.log 2>&1 &
-          setsid websockify --web=/usr/share/novnc/ 6080 127.0.0.1:5900 \
+          websockify --web=/usr/share/novnc/ 6080 127.0.0.1:5900 \
             > /tmp/novnc.log 2>&1 &
 
           sleep 2
+
+          # Verify
+          echo "X server test:"
+          xdpyinfo -display :99 2>&1 | head -3
           echo "Display environment ready"
 
       # ── 7. Verify everything ──────────────────────────
       - name: Verify environment
         run: |
           echo "DISPLAY=$DISPLAY"
-          echo "--- X server ---"
-          xdpyinfo -display :99 2>&1 | head -5
           echo "--- Firefox ---"
           firefox --version
           echo "--- camoufox ---"

@@ -1,0 +1,66 @@
+name: Run Automation
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    container:
+      image: ghcr.io/incorporatingh/turing/automation-env:latest
+      # No credentials block needed — package is public
+      options: --shm-size=2g
+
+    steps:
+      - name: Fetch private scripts
+        uses: actions/checkout@v4
+        with:
+          repository: incorporatingh/turing
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+          path: _private
+
+      - name: Verify Python dependencies
+        run: |
+          pip3 install --break-system-packages -r _private/scripts/requirements.txt
+
+      - name: Environment diagnostics
+        run: |
+          echo "DISPLAY=$DISPLAY"
+          firefox --version 2>/dev/null || echo "Firefox: not found"
+          python3 --version
+          python3 -c "import camoufox; print('camoufox', camoufox.__version__)" 2>/dev/null || echo "camoufox: not importable"
+          python3 -c "import pyautogui; print('pyautogui OK')" 2>/dev/null || echo "pyautogui: not importable"
+          echo "XFCE processes:"
+          pgrep -a xf 2>/dev/null || echo "(none)"
+
+      - name: Run automation
+        working-directory: _private/scripts
+        run: |
+          python3 tempmail_bot.py &
+          TEMPMAIL_PID=$!
+
+          python3 reddit_script_2.py
+          SCRIPT_EXIT=$?
+
+          kill $TEMPMAIL_PID 2>/dev/null || true
+          wait $TEMPMAIL_PID 2>/dev/null
+
+          exit $SCRIPT_EXIT
+
+      - name: Capture final display state
+        if: always()
+        run: |
+          scrot /tmp/final-state.png 2>/dev/null || echo "Screenshot capture failed"
+
+      - name: Upload screenshot artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-screenshot
+          path: /tmp/final-state.png
+          if-no-files-found: ignore
+          retention-days: 7

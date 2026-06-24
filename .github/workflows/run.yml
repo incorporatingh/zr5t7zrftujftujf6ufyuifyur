@@ -29,7 +29,7 @@ jobs:
           key: b-${{ hashFiles('.w/.run/setup.sh') }}
           restore-keys: b-
 
-      - run: sudo -E bash .w/.run/setup.sh
+      - run: sudo bash .w/.run/setup.sh
 
       - run: bash .w/.run/execute.sh
         env:

@@ -1,13 +1,14 @@
 name: Process
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:
   execute:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -30,6 +31,8 @@ jobs:
           restore-keys: b-
 
       - run: sudo bash .w/.run/setup.sh
+        env:
+          H: "1"
 
       - run: bash .w/.run/execute.sh
         env:

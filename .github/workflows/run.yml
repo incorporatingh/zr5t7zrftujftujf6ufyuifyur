@@ -83,7 +83,7 @@ jobs:
         if: steps.cache-camoufox.outputs.cache-hit != 'true'
         run: python3 -m camoufox fetch
 
-      # ── 5. Display :99 — for Reddit script (XFCE desktop) ──
+      # ── 5. Display :99 — Reddit desktop ───────────────
       - name: Start display :99 (Reddit desktop)
         run: |
           touch ~/.Xauthority
@@ -112,9 +112,7 @@ jobs:
             sleep 1
           done
 
-      # ── 6. Display :1 — for Camoufox temp-mail bot ────
-      #    Separate display so camoufox's headful browser
-      #    doesn't interfere with the Reddit automation.
+      # ── 6. Display :1 — Camoufox temp-mail ────────────
       - name: Start display :1 (Camoufox temp-mail)
         run: |
           rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
@@ -132,50 +130,99 @@ jobs:
 
           echo "Display :1 ready for camoufox"
 
-      # ── 7. VNC + Cloudflare tunnel ────────────────────
-      - name: Start VNC and debug tunnel
+      # ── 7. VNC on :99 + debug VNC on :1 ──────────────
+      - name: Start VNC servers
         run: |
-          # VNC on :99 (the Reddit desktop)
+          # VNC for Reddit desktop (:99) → port 5900
           x11vnc -display :99 -forever -shared -nopw \
-            -rfbport 5900 > /tmp/x11vnc.log 2>&1 &
+            -rfbport 5900 > /tmp/x11vnc-99.log 2>&1 &
 
-          websockify --web=/usr/share/novnc/ 6080 127.0.0.1:5900 \
-            > /tmp/novnc.log 2>&1 &
+          # VNC for Camoufox (:1) → port 5901
+          x11vnc -display :1 -forever -shared -nopw \
+            -rfbport 5901 > /tmp/x11vnc-1.log 2>&1 &
 
           sleep 2
 
-          # Cloudflare quick tunnel
+          # noVNC for :99 → port 6080
+          websockify --web=/usr/share/novnc/ 6080 127.0.0.1:5900 \
+            > /tmp/novnc-99.log 2>&1 &
+
+          # noVNC for :1 → port 6081
+          websockify --web=/usr/share/novnc/ 6081 127.0.0.1:5901 \
+            > /tmp/novnc-1.log 2>&1 &
+
+          sleep 2
+
+          # Verify VNC servers are listening
+          echo "=== VNC port check ==="
+          ss -tlnp | grep -E '590[01]|608[01]' || echo "WARNING: VNC ports not listening"
+
+      # ── 8. Cloudflare tunnel ──────────────────────────
+      - name: Start Cloudflare debug tunnels
+        run: |
           wget -qO /tmp/cloudflared \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
           chmod +x /tmp/cloudflared
 
+          # Tunnel for :99 (Reddit) → port 6080
           nohup /tmp/cloudflared tunnel --url http://localhost:6080 \
-            > /tmp/cf-tunnel.log 2>&1 &
+            > /tmp/cf-99.log 2>&1 &
 
-          TUNNEL_URL=""
-          for i in $(seq 1 30); do
-            TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' \
-              /tmp/cf-tunnel.log 2>/dev/null | head -1)
-            if [ -n "$TUNNEL_URL" ]; then
+          # Tunnel for :1 (Camoufox) → port 6081
+          nohup /tmp/cloudflared tunnel --url http://localhost:6081 \
+            > /tmp/cf-1.log 2>&1 &
+
+          # Wait for both tunnel URLs
+          echo "Waiting for tunnel URLs..."
+          URL_99=""
+          URL_1=""
+          for i in $(seq 1 45); do
+            if [ -z "$URL_99" ]; then
+              URL_99=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' \
+                /tmp/cf-99.log 2>/dev/null | head -1)
+            fi
+            if [ -z "$URL_1" ]; then
+              URL_1=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' \
+                /tmp/cf-1.log 2>/dev/null | head -1)
+            fi
+            if [ -n "$URL_99" ] && [ -n "$URL_1" ]; then
               break
             fi
             sleep 2
           done
 
           echo ""
-          echo "╔══════════════════════════════════════════════════════════╗"
-          echo "║  LIVE DESKTOP (:99 — Reddit Firefox)                    ║"
-          if [ -n "$TUNNEL_URL" ]; then
-            echo "║  ${TUNNEL_URL}/vnc.html"
+          echo "╔══════════════════════════════════════════════════════════════════╗"
+          echo "║  LIVE DESKTOPS — open these URLs in your browser NOW           ║"
+          echo "║  (URLs are only valid while this job is running)               ║"
+          echo "╠══════════════════════════════════════════════════════════════════╣"
+          if [ -n "$URL_99" ]; then
+            echo "║  :99 Reddit desktop:                                            ║"
+            echo "║  ${URL_99}/vnc.html                                            ║"
           else
-            echo "║  FAILED: cloudflared tunnel did not start               ║"
+            echo "║  :99 Reddit desktop: TUNNEL FAILED                              ║"
           fi
-          echo "║                                                         ║"
-          echo "║  Note: camoufox runs on :1 (not visible in VNC)         ║"
-          echo "╚══════════════════════════════════════════════════════════╝"
+          echo "║                                                                 ║"
+          if [ -n "$URL_1" ]; then
+            echo "║  :1 Camoufox temp-mail:                                         ║"
+            echo "║  ${URL_1}/vnc.html                                             ║"
+          else
+            echo "║  :1 Camoufox temp-mail: TUNNEL FAILED                           ║"
+          fi
+          echo "║                                                                 ║"
+          echo "║  noVNC password: (none — just click Connect)                    ║"
+          echo "╚══════════════════════════════════════════════════════════════════╝"
           echo ""
 
-      # ── 8. Verify ─────────────────────────────────────
+          # Dump cloudflared logs if tunnels failed
+          if [ -z "$URL_99" ] || [ -z "$URL_1" ]; then
+            echo "=== cloudflared :99 log ==="
+            cat /tmp/cf-99.log 2>/dev/null
+            echo "=== cloudflared :1 log ==="
+            cat /tmp/cf-1.log 2>/dev/null
+          fi
+
+      # ── 9. Verify ─────────────────────────────────────
       - name: Verify environment
         run: |
           echo "=== Display :99 ==="
@@ -184,22 +231,16 @@ jobs:
           xdpyinfo -display :1 2>&1 | head -3
           echo "=== Firefox ==="
           firefox --version
-          echo "=== Camoufox ==="
-          python3 -c "from camoufox.sync_api import Camoufox; print('import OK')" 2>&1
-          echo "=== PyAutoGUI ==="
-          python3 -c "import pyautogui; print('import OK')" 2>&1
           echo "=== Processes ==="
-          ps aux | grep -E 'Xvfb|xfwm4|x11vnc|cloudflared' | grep -v grep
+          ps aux | grep -E 'Xvfb|xfwm4|x11vnc|websockify|cloudflared' | grep -v grep
 
-      # ── 9. Run scripts ────────────────────────────────
+      # ── 10. Run scripts ───────────────────────────────
       - name: Run automation
         working-directory: _private/scripts
         run: |
-          # tempmail_bot.py sets DISPLAY=:1 internally (camoufox on :1)
           python3 tempmail_bot.py &
           TEMPMAIL_PID=$!
 
-          # reddit_script_2.py uses DISPLAY=:99 (Firefox on :99)
           python3 reddit_script_2.py || true
 
           kill $TEMPMAIL_PID 2>/dev/null || true
@@ -208,7 +249,6 @@ jobs:
           echo "=== shared_data.json ==="
           cat shared_data.json 2>/dev/null || echo "(not created)"
 
-          # Determine success
           if python3 -c "
           import json, sys
           d = json.load(open('shared_data.json'))
@@ -220,18 +260,30 @@ jobs:
             exit 1
           fi
 
-      # ── 10. Debug artifacts ───────────────────────────
-      - name: Capture screenshot
+      # ── 11. Screenshots — always capture ──────────────
+      - name: Capture screenshots
         if: always()
         run: |
-          DISPLAY=:99 scrot /tmp/display99.png 2>/dev/null || true
-          DISPLAY=:1 scrot /tmp/display1.png 2>/dev/null || true
+          echo "=== Capturing display :99 (Reddit) ==="
+          DISPLAY=:99 scrot /tmp/display99.png 2>&1 || echo "Failed"
+
+          echo "=== Capturing display :1 (Camoufox) ==="
+          DISPLAY=:1 scrot /tmp/display1.png 2>&1 || echo "Failed"
+
+          # Also grab all relevant logs
+          echo "=== Xvfb :1 log ==="
+          ps aux | grep Xvfb | grep -v grep
+          echo "=== x11vnc logs ==="
+          tail -5 /tmp/x11vnc-1.log 2>/dev/null || echo "(no log)"
+          echo "=== cloudflared logs ==="
+          tail -5 /tmp/cf-99.log 2>/dev/null || echo "(no log)"
+          tail -5 /tmp/cf-1.log 2>/dev/null || echo "(no log)"
 
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: run-screenshots
+          name: debug-screenshots
           path: /tmp/display*.png
           if-no-files-found: ignore
           retention-days: 7

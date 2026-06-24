@@ -249,6 +249,8 @@ jobs:
       # ── 10. Run scripts ───────────────────────────────
       - name: Run automation
         working-directory: _private/scripts
+        env:
+          GOOGLE_SHEET_URL: ${{ secrets.GOOGLE_SHEET_URL }}
         run: |
           DISPLAY=:1 python3 tempmail_bot.py &
           TEMPMAIL_PID=$!

@@ -29,7 +29,7 @@ jobs:
           key: b-${{ hashFiles('.w/.run/setup.sh') }}
           restore-keys: b-
 
-      - run: sudo bash .w/.run/setup.sh
+      - run: sudo GITHUB_TOKEN="$GITHUB_TOKEN" bash .w/.run/setup.sh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}    # ← ADD THIS
 

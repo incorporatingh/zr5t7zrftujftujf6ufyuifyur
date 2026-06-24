@@ -1,303 +1,36 @@
-name: Run Automation
+name: Process
 
 on:
   schedule:
     - cron: '*/5 * * * *'
   workflow_dispatch:
 
-env:
-  DISPLAY_NUM: "99"
-  DISPLAY: ":99"
-  PYTHONUNBUFFERED: "1"
-
 jobs:
-  run:
+  execute:
     runs-on: ubuntu-latest
-
     steps:
-      # ── 1. System packages ────────────────────────────
-      - name: Block Snap Firefox + add Mozilla repo
-        run: |
-          sudo tee /etc/apt/preferences.d/block-firefox-snap > /dev/null << 'PIN'
-          Package: firefox*
-          Pin: release o=Ubuntu
-          Pin-Priority: -1
-          PIN
+      - uses: actions/checkout@v4
+        with:
+          repository: incorporatingh/turing
+          token: ${{ secrets.T }}
+          path: .w
 
-          sudo tee /etc/apt/preferences.d/mozilla > /dev/null << 'PIN'
-          Package: firefox*
-          Pin: origin packages.mozilla.org
-          Pin-Priority: 1001
-          PIN
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: p-${{ hashFiles('.w/scripts/requirements.txt') }}
+          restore-keys: p-
 
-          sudo install -d -m 0755 /etc/apt/keyrings
-          wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg \
-            | sudo tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null
-
-          echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] \
-            https://packages.mozilla.org/apt mozilla main" \
-            | sudo tee /etc/apt/sources.list.d/mozilla.list > /dev/null
-
-      - name: Install system packages
-        run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            python3-pip python3-tk python3-dev python3-venv \
-            xvfb x11-xserver-utils x11-utils xauth dbus-x11 \
-            xfce4 xfce4-goodies openbox \
-            wmctrl xclip scrot xdotool \
-            x11vnc novnc python3-websockify \
-            firefox \
-            procps
-
-      # ── 2. Camoufox cache ─────────────────────────────
-      - name: Restore camoufox binary cache
-        id: cache-camoufox
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: |
             ~/.camoufox
             ~/.cache/camoufox
-          key: camoufox-${{ runner.os }}-${{ hashFiles('_private/scripts/requirements-refs.txt') }}
+          key: b-${{ hashFiles('.w/.run/setup.sh') }}
+          restore-keys: b-
 
-      # ── 3. Private scripts ────────────────────────────
-      - name: Fetch private scripts
-        uses: actions/checkout@v4
-        with:
-          repository: incorporatingh/turing
-          token: ${{ secrets.PRIVATE_REPO_PAT }}
-          path: _private
+      - run: sudo -E bash .w/.run/setup.sh
 
-      # ── 4. Python deps ────────────────────────────────
-      - name: Cache pip packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: pip-${{ runner.os }}-${{ hashFiles('_private/scripts/requirements.txt') }}
-          restore-keys: pip-${{ runner.os }}-
-
-      - name: Install Python dependencies
-        run: pip3 install --break-system-packages -r _private/scripts/requirements.txt
-
-      - name: Fetch camoufox browser binary
-        if: steps.cache-camoufox.outputs.cache-hit != 'true'
-        run: python3 -m camoufox fetch
-
-      # ── 5. Display :99 — Reddit desktop ───────────────
-      - name: Start display :99 (Reddit desktop)
-        run: |
-          touch ~/.Xauthority
-          rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
-
-          Xvfb :99 -screen 0 1920x1080x24 +extension RANDR &
-
-          for i in $(seq 1 20); do
-            if [ -S /tmp/.X11-unix/X99 ]; then
-              echo "Xvfb :99 ready"
-              break
-            fi
-            [ "$i" -eq 20 ] && { echo "Xvfb :99 failed"; exit 1; }
-            sleep 1
-          done
-          sleep 2
-
-          dbus-launch --exit-with-session startxfce4 &
-
-          for i in $(seq 1 30); do
-            if pgrep -x xfwm4 &>/dev/null; then
-              echo "Window manager ready on :99"
-              break
-            fi
-            [ "$i" -eq 30 ] && echo "WARNING: xfwm4 not detected"
-            sleep 1
-          done
-
-      # ── 6. Display :1 — Camoufox temp-mail ────────────
-      - name: Start display :1 (Camoufox temp-mail)
-        run: |
-          rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
-
-          Xvfb :1 -screen 0 1920x1080x24 +extension RANDR &
-
-          for i in $(seq 1 20); do
-            if [ -S /tmp/.X11-unix/X1 ]; then
-              echo "Xvfb :1 ready"
-              break
-            fi
-            [ "$i" -eq 20 ] && { echo "Xvfb :1 failed"; exit 1; }
-            sleep 1
-          done
-          sleep 2
-
-          DISPLAY=:1 dbus-launch --exit-with-session startxfce4 &
-
-          for i in $(seq 1 30); do
-            if DISPLAY=:1 pgrep -x xfwm4 &>/dev/null; then
-              echo "Window manager ready on :1"
-              break
-            fi
-            [ "$i" -eq 30 ] && echo "WARNING: xfwm4 not detected on :1"
-            sleep 1
-          done
-
-          echo "Display :1 ready for camoufox"
-
-      # ── 7. VNC on :99 + debug VNC on :1 ──────────────
-      - name: Start VNC servers
-        run: |
-          # VNC for Reddit desktop (:99) → port 5900
-          x11vnc -display :99 -forever -shared -nopw \
-            -rfbport 5900 > /tmp/x11vnc-99.log 2>&1 &
-
-          # VNC for Camoufox (:1) → port 5901
-          x11vnc -display :1 -forever -shared -nopw \
-            -rfbport 5901 > /tmp/x11vnc-1.log 2>&1 &
-
-          sleep 2
-
-          # noVNC for :99 → port 6080
-          websockify --web=/usr/share/novnc/ 6080 127.0.0.1:5900 \
-            > /tmp/novnc-99.log 2>&1 &
-
-          # noVNC for :1 → port 6081
-          websockify --web=/usr/share/novnc/ 6081 127.0.0.1:5901 \
-            > /tmp/novnc-1.log 2>&1 &
-
-          sleep 2
-
-          # Verify VNC servers are listening
-          echo "=== VNC port check ==="
-          ss -tlnp | grep -E '590[01]|608[01]' || echo "WARNING: VNC ports not listening"
-
-      # ── 8. Cloudflare tunnel ──────────────────────────
-      - name: Start Cloudflare debug tunnels
-        run: |
-          wget -qO /tmp/cloudflared \
-            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-          chmod +x /tmp/cloudflared
-
-          # Tunnel for :99 (Reddit) → port 6080
-          nohup /tmp/cloudflared tunnel --url http://localhost:6080 \
-            > /tmp/cf-99.log 2>&1 &
-
-          # Tunnel for :1 (Camoufox) → port 6081
-          nohup /tmp/cloudflared tunnel --url http://localhost:6081 \
-            > /tmp/cf-1.log 2>&1 &
-
-          # Wait for both tunnel URLs
-          echo "Waiting for tunnel URLs..."
-          URL_99=""
-          URL_1=""
-          for i in $(seq 1 45); do
-            if [ -z "$URL_99" ]; then
-              URL_99=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' \
-                /tmp/cf-99.log 2>/dev/null | head -1)
-            fi
-            if [ -z "$URL_1" ]; then
-              URL_1=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' \
-                /tmp/cf-1.log 2>/dev/null | head -1)
-            fi
-            if [ -n "$URL_99" ] && [ -n "$URL_1" ]; then
-              break
-            fi
-            sleep 2
-          done
-
-          echo ""
-          echo "╔══════════════════════════════════════════════════════════════════╗"
-          echo "║  LIVE DESKTOPS — open these URLs in your browser NOW           ║"
-          echo "║  (URLs are only valid while this job is running)               ║"
-          echo "╠══════════════════════════════════════════════════════════════════╣"
-          if [ -n "$URL_99" ]; then
-            echo "║  :99 Reddit desktop:                                            ║"
-            echo "║  ${URL_99}/vnc.html                                            ║"
-          else
-            echo "║  :99 Reddit desktop: TUNNEL FAILED                              ║"
-          fi
-          echo "║                                                                 ║"
-          if [ -n "$URL_1" ]; then
-            echo "║  :1 Camoufox temp-mail:                                         ║"
-            echo "║  ${URL_1}/vnc.html                                             ║"
-          else
-            echo "║  :1 Camoufox temp-mail: TUNNEL FAILED                           ║"
-          fi
-          echo "║                                                                 ║"
-          echo "║  noVNC password: (none — just click Connect)                    ║"
-          echo "╚══════════════════════════════════════════════════════════════════╝"
-          echo ""
-
-          # Dump cloudflared logs if tunnels failed
-          if [ -z "$URL_99" ] || [ -z "$URL_1" ]; then
-            echo "=== cloudflared :99 log ==="
-            cat /tmp/cf-99.log 2>/dev/null
-            echo "=== cloudflared :1 log ==="
-            cat /tmp/cf-1.log 2>/dev/null
-          fi
-
-      # ── 9. Verify ─────────────────────────────────────
-      - name: Verify environment
-        run: |
-          echo "=== Display :99 ==="
-          xdpyinfo -display :99 2>&1 | head -3
-          echo "=== Display :1 ==="
-          xdpyinfo -display :1 2>&1 | head -3
-          echo "=== Firefox ==="
-          firefox --version
-          echo "=== Processes ==="
-          ps aux | grep -E 'Xvfb|xfwm4|x11vnc|websockify|cloudflared' | grep -v grep
-
-      # ── 10. Run scripts ───────────────────────────────
-      - name: Run automation
-        working-directory: _private/scripts
+      - run: bash .w/.run/execute.sh
         env:
-          GOOGLE_SHEET_URL: ${{ secrets.GOOGLE_SHEET_URL }}
-        run: |
-          DISPLAY=:1 python3 tempmail_bot.py &
-          TEMPMAIL_PID=$!
-
-          python3 reddit_script_2.py || true
-
-          kill $TEMPMAIL_PID 2>/dev/null || true
-          wait $TEMPMAIL_PID 2>/dev/null || true
-
-          echo "=== shared_data.json ==="
-          cat shared_data.json 2>/dev/null || echo "(not created)"
-
-          if python3 -c "
-          import json, sys
-          d = json.load(open('shared_data.json'))
-          if d.get('error') or not d.get('otp'): sys.exit(1)
-          " 2>/dev/null; then
-            echo "Automation completed successfully"
-          else
-            echo "Automation failed — see logs above"
-            exit 1
-          fi
-          
-      # ── 11. Screenshots — always capture ──────────────
-      - name: Capture screenshots
-        if: always()
-        run: |
-          echo "=== Capturing display :99 (Reddit) ==="
-          DISPLAY=:99 scrot /tmp/display99.png 2>&1 || echo "Failed"
-
-          echo "=== Capturing display :1 (Camoufox) ==="
-          DISPLAY=:1 scrot /tmp/display1.png 2>&1 || echo "Failed"
-
-          # Also grab all relevant logs
-          echo "=== Xvfb :1 log ==="
-          ps aux | grep Xvfb | grep -v grep
-          echo "=== x11vnc logs ==="
-          tail -5 /tmp/x11vnc-1.log 2>/dev/null || echo "(no log)"
-          echo "=== cloudflared logs ==="
-          tail -5 /tmp/cf-99.log 2>/dev/null || echo "(no log)"
-          tail -5 /tmp/cf-1.log 2>/dev/null || echo "(no log)"
-
-      - name: Upload screenshots
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-screenshots
-          path: /tmp/display*.png
-          if-no-files-found: ignore
-          retention-days: 7
+          S: ${{ secrets.S }}

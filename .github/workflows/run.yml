@@ -30,6 +30,8 @@ jobs:
           restore-keys: b-
 
       - run: sudo bash .w/.run/setup.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}    # ← ADD THIS
 
       - run: bash .w/.run/execute.sh
         env:

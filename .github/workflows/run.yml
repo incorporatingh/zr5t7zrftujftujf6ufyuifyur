@@ -1,55 +1,36 @@
-#!/usr/bin/env bash
-set -euo pipefail
+name: Process
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BASE_DIR="$(dirname "$SCRIPT_DIR")"
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
 
-echo "[setup] Configuring Firefox repositories..."
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: incorporatingh/turing
+          token: ${{ secrets.T }}
+          path: .w
 
-cat > /etc/apt/preferences.d/block-firefox-snap << 'PIN'
-Package: firefox*
-Pin: release o=Ubuntu
-Pin-Priority: -1
-PIN
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: p-${{ hashFiles('.w/scripts/requirements.txt') }}
+          restore-keys: p-
 
-cat > /etc/apt/preferences.d/mozilla << 'PIN'
-Package: firefox*
-Pin: origin packages.mozilla.org
-Pin-Priority: 1001
-PIN
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.camoufox
+            ~/.cache/camoufox
+          key: b-${{ hashFiles('.w/.run/setup.sh') }}
+          restore-keys: b-
 
-install -d -m 0755 /etc/apt/keyrings
-wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg \
-  | tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null
+      - run: sudo bash .w/.run/setup.sh
 
-echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] \
-  https://packages.mozilla.org/apt mozilla main" \
-  > /etc/apt/sources.list.d/mozilla.list
-
-echo "[setup] Installing system packages..."
-apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-  python3-pip python3-tk python3-dev python3-venv \
-  xvfb x11-xserver-utils x11-utils xauth dbus-x11 \
-  xfce4 xfce4-goodies openbox \
-  wmctrl xclip scrot xdotool \
-  x11vnc novnc python3-websockify \
-  firefox \
-  procps \
-  > /dev/null
-
-rm -rf /var/lib/apt/lists/*
-
-echo "[setup] Installing Python packages..."
-pip3 install --break-system-packages --no-cache-dir \
-  -r "$BASE_DIR/scripts/requirements.txt"
-
-echo "[setup] Verifying camoufox cache..."
-if [ ! -d "$HOME/.camoufox" ] && [ ! -d "$HOME/.cache/camoufox" ]; then
-  echo "[setup] Fetching camoufox binary..."
-  python3 -m camoufox fetch
-else
-  echo "[setup] Camoufox cache present, skipping download"
-fi
-
-echo "[setup] Done."
+      - run: bash .w/.run/execute.sh
+        env:
+          S: ${{ secrets.S }}

@@ -8,7 +8,7 @@ on:
 env:
   DISPLAY_NUM: "99"
   DISPLAY: ":99"
-  PYTHONUNBUFFERED: "1"     # ← ADD THIS — forces all Python print() to flush immediately
+  PYTHONUNBUFFERED: "1"
 
 jobs:
   run:
@@ -83,8 +83,8 @@ jobs:
         if: steps.cache-camoufox.outputs.cache-hit != 'true'
         run: python3 -m camoufox fetch
 
-      # ── 5. Display environment ────────────────────────
-      - name: Start headless display
+      # ── 5. Display :99 — for Reddit script (XFCE desktop) ──
+      - name: Start display :99 (Reddit desktop)
         run: |
           touch ~/.Xauthority
           rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
@@ -93,10 +93,10 @@ jobs:
 
           for i in $(seq 1 20); do
             if [ -S /tmp/.X11-unix/X99 ]; then
-              echo "Xvfb ready"
+              echo "Xvfb :99 ready"
               break
             fi
-            [ "$i" -eq 20 ] && { echo "Xvfb failed"; exit 1; }
+            [ "$i" -eq 20 ] && { echo "Xvfb :99 failed"; exit 1; }
             sleep 1
           done
           sleep 2
@@ -105,17 +105,37 @@ jobs:
 
           for i in $(seq 1 30); do
             if pgrep -x xfwm4 &>/dev/null; then
-              echo "Window manager ready"
+              echo "Window manager ready on :99"
               break
             fi
             [ "$i" -eq 30 ] && echo "WARNING: xfwm4 not detected"
             sleep 1
           done
 
-      # ── 6. VNC + Cloudflare tunnel ────────────────────
+      # ── 6. Display :1 — for Camoufox temp-mail bot ────
+      #    Separate display so camoufox's headful browser
+      #    doesn't interfere with the Reddit automation.
+      - name: Start display :1 (Camoufox temp-mail)
+        run: |
+          rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
+
+          Xvfb :1 -screen 0 1280x720x24 &
+
+          for i in $(seq 1 20); do
+            if [ -S /tmp/.X11-unix/X1 ]; then
+              echo "Xvfb :1 ready"
+              break
+            fi
+            [ "$i" -eq 20 ] && { echo "Xvfb :1 failed"; exit 1; }
+            sleep 1
+          done
+
+          echo "Display :1 ready for camoufox"
+
+      # ── 7. VNC + Cloudflare tunnel ────────────────────
       - name: Start VNC and debug tunnel
         run: |
-          # Start VNC server
+          # VNC on :99 (the Reddit desktop)
           x11vnc -display :99 -forever -shared -nopw \
             -rfbport 5900 > /tmp/x11vnc.log 2>&1 &
 
@@ -124,16 +144,14 @@ jobs:
 
           sleep 2
 
-          # Install cloudflared
+          # Cloudflare quick tunnel
           wget -qO /tmp/cloudflared \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
           chmod +x /tmp/cloudflared
 
-          # Start quick tunnel (no Cloudflare account needed)
           nohup /tmp/cloudflared tunnel --url http://localhost:6080 \
             > /tmp/cf-tunnel.log 2>&1 &
 
-          # Wait for tunnel URL to appear
           TUNNEL_URL=""
           for i in $(seq 1 30); do
             TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' \
@@ -146,75 +164,74 @@ jobs:
 
           echo ""
           echo "╔══════════════════════════════════════════════════════════╗"
-          echo "║  LIVE DESKTOP — open this URL in your browser:          ║"
-          echo "║                                                         ║"
+          echo "║  LIVE DESKTOP (:99 — Reddit Firefox)                    ║"
           if [ -n "$TUNNEL_URL" ]; then
             echo "║  ${TUNNEL_URL}/vnc.html"
           else
             echo "║  FAILED: cloudflared tunnel did not start               ║"
-            echo "║  Check /tmp/cf-tunnel.log for details                   ║"
           fi
           echo "║                                                         ║"
-          echo "║  When noVNC connects: click the screen, no password     ║"
+          echo "║  Note: camoufox runs on :1 (not visible in VNC)         ║"
           echo "╚══════════════════════════════════════════════════════════╝"
           echo ""
 
-      # ── 7. Verify ─────────────────────────────────────
+      # ── 8. Verify ─────────────────────────────────────
       - name: Verify environment
         run: |
-          echo "DISPLAY=$DISPLAY"
-          echo "--- Firefox ---"
+          echo "=== Display :99 ==="
+          xdpyinfo -display :99 2>&1 | head -3
+          echo "=== Display :1 ==="
+          xdpyinfo -display :1 2>&1 | head -3
+          echo "=== Firefox ==="
           firefox --version
-          echo "--- camoufox ---"
+          echo "=== Camoufox ==="
           python3 -c "from camoufox.sync_api import Camoufox; print('import OK')" 2>&1
-          echo "--- pyautogui ---"
+          echo "=== PyAutoGUI ==="
           python3 -c "import pyautogui; print('import OK')" 2>&1
-          echo "--- processes ---"
-          ps aux | grep -E 'Xvfb|xfwm4|x11vnc|websockify|cloudflared' | grep -v grep
+          echo "=== Processes ==="
+          ps aux | grep -E 'Xvfb|xfwm4|x11vnc|cloudflared' | grep -v grep
 
-      # ── 8. Run scripts ────────────────────────────────
+      # ── 9. Run scripts ────────────────────────────────
       - name: Run automation
         working-directory: _private/scripts
         run: |
+          # tempmail_bot.py sets DISPLAY=:1 internally (camoufox on :1)
           python3 tempmail_bot.py &
           TEMPMAIL_PID=$!
 
+          # reddit_script_2.py uses DISPLAY=:99 (Firefox on :99)
           python3 reddit_script_2.py || true
 
           kill $TEMPMAIL_PID 2>/dev/null || true
           wait $TEMPMAIL_PID 2>/dev/null || true
 
-          # Check if email/otp data was actually produced
-          if [ -f shared_data.json ]; then
-            echo "=== shared_data.json contents ==="
-            cat shared_data.json
-          else
-            echo "=== shared_data.json was never created ==="
-          fi
+          echo "=== shared_data.json ==="
+          cat shared_data.json 2>/dev/null || echo "(not created)"
 
-          # Exit with the original script's error if it failed
-          if [ -f shared_data.json ] && python3 -c "
+          # Determine success
+          if python3 -c "
           import json, sys
           d = json.load(open('shared_data.json'))
-          if d.get('error'): sys.exit(1)
-          if not d.get('otp'): sys.exit(1)
-          "; then
+          if d.get('error') or not d.get('otp'): sys.exit(1)
+          " 2>/dev/null; then
             echo "Automation completed successfully"
           else
             echo "Automation failed — see logs above"
             exit 1
           fi
-          
-      # ── 9. Debug artifacts ────────────────────────────
+
+      # ── 10. Debug artifacts ───────────────────────────
       - name: Capture screenshot
         if: always()
-        run: scrot /tmp/final-state.png 2>/dev/null || true
+        run: |
+          DISPLAY=:99 scrot /tmp/display99.png 2>/dev/null || true
+          DISPLAY=:1 scrot /tmp/display1.png 2>/dev/null || true
 
-      - name: Upload screenshot
+      - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: run-screenshot
-          path: /tmp/final-state.png
+          name: run-screenshots
+          path: /tmp/display*.png
           if-no-files-found: ignore
           retention-days: 7
